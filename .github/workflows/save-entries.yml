@@ -1,0 +1,148 @@
+name: Save Food Log Entries
+
+# Triggered by the app via repository_dispatch — the token that triggers
+# this workflow has Actions:write scope ONLY, not Contents access.
+# The actual file writes use GITHUB_TOKEN (the built-in Actions token)
+# which is scoped automatically to this repo and never leaves GitHub.
+on:
+  repository_dispatch:
+    types: [save-food-log]
+
+  # Also allow manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: 'Run in test mode (no writes)'
+        required: false
+        default: 'false'
+
+jobs:
+  save-entries:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # needed to commit entries.json and food_log.csv
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}  # built-in, auto-scoped, no setup needed
+
+      - name: Validate and write entries.json
+        env:
+          ENTRIES_JSON: ${{ toJson(github.event.client_payload.entries) }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os, sys
+
+          raw = os.environ.get('ENTRIES_JSON', '[]')
+
+          # Parse and validate
+          try:
+              entries = json.loads(raw)
+          except json.JSONDecodeError as e:
+              print(f"Invalid JSON payload: {e}")
+              sys.exit(1)
+
+          if not isinstance(entries, list):
+              print("Payload must be a JSON array")
+              sys.exit(1)
+
+          # Cap at 2000 entries
+          entries = entries[:2000]
+
+          # Sanitize each entry
+          ALLOWED_MEALS = {'Breakfast','Lunch','Dinner','Snack','Drink'}
+
+          def safe_str(val, max_len=500):
+              s = str(val or '').strip()
+              s = ''.join(c for c in s if ord(c) >= 32 or c == '\t')
+              return s[:max_len]
+
+          def safe_int(val, lo=0, hi=9999):
+              try:
+                  return max(lo, min(hi, int(val)))
+              except (TypeError, ValueError):
+                  return 0
+
+          def safe_date(val):
+              import re
+              s = str(val or '')
+              return s if re.match(r'^\d{4}-\d{2}-\d{2}$', s) else ''
+
+          sanitized = []
+          for e in entries:
+              sanitized.append({
+                  'id':      safe_str(e.get('id',''), 40),
+                  'date':    safe_date(e.get('date','')),
+                  'time':    safe_str(e.get('time',''), 20),
+                  'meal':    e.get('meal','Snack') if e.get('meal') in ALLOWED_MEALS else 'Snack',
+                  'food':    safe_str(e.get('food',''), 200),
+                  'portion': safe_str(e.get('portion',''), 100),
+                  'cal':     safe_int(e.get('cal')),
+                  'mood':    safe_str(e.get('mood',''), 10),
+                  'notes':   safe_str(e.get('notes',''), 500),
+                  'isWater': bool(e.get('isWater', False)),
+              })
+              # Remove entries with no date or food
+              if not sanitized[-1]['date'] and not sanitized[-1]['isWater']:
+                  sanitized.pop()
+
+          os.makedirs('data', exist_ok=True)
+          with open('data/entries.json', 'w', encoding='utf-8') as f:
+              json.dump(sanitized, f, indent=2, ensure_ascii=False)
+
+          print(f"Written {len(sanitized)} entries to data/entries.json")
+          PYEOF
+
+      - name: Generate food_log.csv from entries.json
+        run: |
+          python3 << 'PYEOF'
+          import json, csv, os
+
+          with open('data/entries.json', 'r', encoding='utf-8') as f:
+              entries = json.load(f)
+
+          HEADERS = ['Date','Time','Meal','Food Item','Portion',
+                     'Calories','Mood','Notes','Water']
+
+          def csv_safe(val, max_len=500):
+              s = str(val or '').strip()[:max_len]
+              # Prevent formula injection
+              if s and s[0] in ('=', '+', '-', '@', '\t', '\r'):
+                  s = "'" + s
+              return s
+
+          rows = []
+          for e in entries:
+              rows.append([
+                  csv_safe(e.get('date','')),
+                  csv_safe(e.get('time','')),
+                  csv_safe(e.get('meal','')),
+                  csv_safe(e.get('food','')),
+                  csv_safe(e.get('portion','')),
+                  e.get('cal','') or '',
+                  csv_safe(e.get('mood','')),
+                  csv_safe(e.get('notes','')),
+                  'Yes' if e.get('isWater') else 'No',
+              ])
+
+          # Sort chronologically
+          rows.sort(key=lambda r: (r[0], r[1]))
+
+          with open('data/food_log.csv', 'w', newline='', encoding='utf-8') as f:
+              writer = csv.writer(f)
+              writer.writerow(HEADERS)
+              writer.writerows(rows)
+
+          print(f"Generated food_log.csv with {len(rows)} rows")
+          PYEOF
+
+      - name: Commit and push changes
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/entries.json data/food_log.csv
+          git diff --staged --quiet && echo "No changes to commit" || \
+            git commit -m "🥗 Food log update — $(date -u +%Y-%m-%d) [skip ci]"
+          git push
