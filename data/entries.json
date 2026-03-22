@@ -1,6 +1,18 @@
 [
   {
-    "id": "1774220927777.51",
+    "id": "1774221430120.85",
+    "date": "2026-03-22",
+    "time": "4:17 PM",
+    "meal": "Breakfast",
+    "food": "Crepe",
+    "portion": "1",
+    "cal": 0,
+    "mood": "😊",
+    "notes": "",
+    "isWater": false
+  },
+  {
+    "id": "1774221384979.86",
     "date": "2026-03-22",
     "time": "4:08 PM",
     "meal": "Snack",
